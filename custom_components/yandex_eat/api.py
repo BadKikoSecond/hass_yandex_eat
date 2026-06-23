@@ -5,20 +5,26 @@ from typing import Any
 
 from .const import (
     EMPTY_HTTP_STATUSES,
-    ORDERS_INFO_BASE_URLS,
-    ORDERS_INFO_PATH,
-    ORDERS_INFO_PAGE_LIMIT,
+    ORDER_HISTORY_PLATFORM_DC,
+    ORDER_HISTORY_PLATFORM_EDA,
+    ORDERS_INFO_BASE_URL,
     ORDERS_INFO_MAX_PAGES,
+    ORDERS_INFO_PAGE_LIMIT,
+    ORDERS_INFO_PATH,
     SERVICE_BASE_URLS,
-    SERVICE_MARKET,
     TRACKED_ORDERS_PATH,
     TRACKING_V2_BASE_URLS,
     TRACKING_V2_PATH,
 )
-from .models import OrderHistoryEntry, Service, TrackedOrder
+from .models import EDA_ORDER_NR_RE, OrderHistoryEntry, Service, TrackedOrder
 from .yandex_session import YandexSession
 
 _LOGGER = logging.getLogger(__name__)
+
+ORDER_HISTORY_STREAMS = (
+    (ORDER_HISTORY_PLATFORM_EDA, Service.EDA),
+    (ORDER_HISTORY_PLATFORM_DC, Service.MARKET),
+)
 
 
 def _service_headers(base: str) -> dict[str, str]:
@@ -37,6 +43,18 @@ def _extract_orders_payload(data: Any) -> list[dict[str, Any]]:
 def _pagination_settings(data: dict[str, Any]) -> dict[str, Any]:
     ps = data.get("pagination_settings")
     return ps if isinstance(ps, dict) else {}
+
+
+def _insert_order_nr(ordered: list[str], order_nr: str) -> None:
+    if not EDA_ORDER_NR_RE.match(order_nr):
+        ordered.append(order_nr)
+        return
+    new_date = int(order_nr[:6])
+    for index, existing in enumerate(ordered):
+        if EDA_ORDER_NR_RE.match(existing) and int(existing[:6]) < new_date:
+            ordered.insert(index, order_nr)
+            return
+    ordered.append(order_nr)
 
 
 class YandexEatApi:
@@ -115,27 +133,31 @@ class YandexEatApi:
 
     async def _async_get_orders_info_page(
         self,
-        base: str,
         *,
+        platform: str,
         cursor: str | None,
     ) -> dict[str, Any] | None:
         pagination_settings: dict[str, Any] = {"limit": ORDERS_INFO_PAGE_LIMIT}
         if cursor:
             pagination_settings["cursor"] = cursor
         body = {"pagination_settings": pagination_settings}
-        url = f"{base}{ORDERS_INFO_PATH}"
-        headers = {**_service_headers(base), "Content-Type": "application/json"}
+        url = f"{ORDERS_INFO_BASE_URL}{ORDERS_INFO_PATH}"
+        headers = {
+            **_service_headers(ORDERS_INFO_BASE_URL),
+            "Content-Type": "application/json",
+            "X-Platform": platform,
+        }
         try:
             data = await self._session.post_json(url, body, headers=headers)
         except Exception as err:
-            _LOGGER.debug("orders-info failed for %s: %s", base, err)
+            _LOGGER.debug("orders-info failed for platform %s: %s", platform, err)
             return None
         return data if isinstance(data, dict) else None
 
-    async def _async_get_orders_from_base(
+    async def _async_get_orders_from_stream(
         self,
-        base: str,
         *,
+        platform: str,
         default_service: Service,
     ) -> list[OrderHistoryEntry]:
         merged: dict[str, OrderHistoryEntry] = {}
@@ -143,7 +165,7 @@ class YandexEatApi:
         cursor: str | None = None
 
         for page in range(ORDERS_INFO_MAX_PAGES):
-            data = await self._async_get_orders_info_page(base, cursor=cursor)
+            data = await self._async_get_orders_info_page(platform=platform, cursor=cursor)
             if not data:
                 break
 
@@ -175,22 +197,24 @@ class YandexEatApi:
     async def async_get_recent_orders(self) -> list[OrderHistoryEntry]:
         merged: dict[str, OrderHistoryEntry] = {}
         ordered: list[str] = []
-        for base in ORDERS_INFO_BASE_URLS:
-            default_service = (
-                Service.MARKET if base == SERVICE_BASE_URLS[SERVICE_MARKET] else Service.EDA
-            )
+
+        for platform, default_service in ORDER_HISTORY_STREAMS:
             try:
-                page_orders = await self._async_get_orders_from_base(
-                    base,
+                stream_orders = await self._async_get_orders_from_stream(
+                    platform=platform,
                     default_service=default_service,
                 )
             except Exception as err:
-                _LOGGER.debug("order history failed for %s: %s", base, err)
+                _LOGGER.debug("order history failed for platform %s: %s", platform, err)
                 continue
 
-            for entry in page_orders:
-                if entry.order_nr not in merged:
-                    ordered.append(entry.order_nr)
+            for entry in stream_orders:
+                if entry.order_nr in merged:
+                    continue
                 merged[entry.order_nr] = entry
+                if platform == ORDER_HISTORY_PLATFORM_EDA:
+                    ordered.append(entry.order_nr)
+                else:
+                    _insert_order_nr(ordered, entry.order_nr)
 
         return [merged[order_nr] for order_nr in ordered if order_nr in merged]

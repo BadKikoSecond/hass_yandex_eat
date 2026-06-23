@@ -81,6 +81,9 @@ class OrderHistoryEntry:
     @staticmethod
     def detect_service(item: dict[str, Any], default: Service = Service.EDA) -> Service:
         order_nr = str(item.get("order_nr", ""))
+        if order_nr.endswith("-grocery"):
+            return Service.LAVKA
+
         general = item.get("widgets", {}).get("general", {})
         if not isinstance(general, dict):
             general = {}
@@ -89,25 +92,12 @@ class OrderHistoryEntry:
         business_type = str(
             general.get("business_type", item.get("business_type", ""))
         ).lower()
-        raw_blob = str(item).lower()
-
-        if order_nr.endswith("-grocery"):
-            return Service.LAVKA
-        if EDA_ORDER_NR_RE.match(order_nr):
-            return Service.EDA
         if "лавка" in name or "lavka" in name:
             return Service.LAVKA
         if business_type in {"shop", "store", "grocery", "lavka"}:
             return Service.LAVKA
-        if "lavka.yandex" in raw_blob or "/lavka/" in raw_blob:
+        if "lavka.yandex" in str(item).lower():
             return Service.LAVKA
-
-        if "деливери" in name or "delivery club" in name:
-            return Service.MARKET
-        if business_type in {"delivery", "dc", "market"}:
-            return Service.MARKET
-        if "market-delivery" in raw_blob or "/dc/" in raw_blob:
-            return Service.MARKET
 
         return default
 

@@ -11,23 +11,23 @@ STATE_NO_ORDER = "none"
 TRACKED_ORDERS_PATH = "/api/v1/providers/orders/v1/tracked-orders"
 TRACKING_V2_PATH = "/api/v2/orders/tracking"
 ORDERS_INFO_PATH = "/eats/v1/orders-info/v1/orders"
+ORDERS_INFO_BASE_URL = "https://eda.yandex.ru"
 ORDERS_INFO_PAGE_LIMIT = 50
 ORDERS_INFO_MAX_PAGES = 20
+
+# orders-info restaurant streams are selected via X-Platform (grocery stream is shared).
+ORDER_HISTORY_PLATFORM_EDA = "android_app"
+ORDER_HISTORY_PLATFORM_DC = "dc_app"
 
 SERVICE_EDA = "eda"
 SERVICE_LAVKA = "lavka"
 SERVICE_MARKET = "market"
 
 SERVICE_BASE_URLS = {
-    SERVICE_EDA: "https://eda.yandex.ru",
+    SERVICE_EDA: ORDERS_INFO_BASE_URL,
     SERVICE_LAVKA: "https://lavka.yandex.ru",
     SERVICE_MARKET: "https://market-delivery.yandex.ru",
 }
-
-# Hosts that share the same eats orders-info / v2 tracking API surface.
-ORDERS_INFO_BASE_URLS = (
-    SERVICE_BASE_URLS[SERVICE_EDA],
-)
 
 TRACKING_V2_BASE_URLS = (
     SERVICE_BASE_URLS[SERVICE_EDA],
