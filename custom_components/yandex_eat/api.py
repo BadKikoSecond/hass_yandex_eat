@@ -1,24 +1,31 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from typing import Any
 
 from .const import (
     EMPTY_HTTP_STATUSES,
+    ORDER_DETAIL_PATH,
+    ORDER_DETAIL_SUPPLEMENT_LIMIT,
     ORDERS_INFO_BASE_URLS,
     ORDERS_INFO_PATH,
     ORDERS_INFO_PAGE_LIMIT,
     ORDERS_INFO_MAX_PAGES,
     SERVICE_BASE_URLS,
+    SERVICE_EDA,
     SERVICE_MARKET,
     TRACKED_ORDERS_PATH,
     TRACKING_V2_BASE_URLS,
     TRACKING_V2_PATH,
 )
-from .models import OrderHistoryEntry, Service, TrackedOrder
+from .models import EDA_ORDER_NR_RE, OrderHistoryEntry, Service, TrackedOrder, _is_retail_chain
 from .yandex_session import YandexSession
 
 _LOGGER = logging.getLogger(__name__)
+
+_ORDERS_HISTORY_STREAMS = ("ordershistory_cursor", "grocery_cursor")
 
 
 def _service_headers(base: str) -> dict[str, str]:
@@ -39,9 +46,20 @@ def _pagination_settings(data: dict[str, Any]) -> dict[str, Any]:
     return ps if isinstance(ps, dict) else {}
 
 
+def _history_sort_key(entry: OrderHistoryEntry) -> str:
+    created = entry.raw.get("created_at")
+    if isinstance(created, str) and created:
+        return created
+    order_nr = entry.order_nr
+    if EDA_ORDER_NR_RE.match(order_nr):
+        return f"20{order_nr[:2]}-{order_nr[2:4]}-{order_nr[4:6]}T00:00:00"
+    return entry.date or ""
+
+
 class YandexEatApi:
     def __init__(self, session: YandexSession) -> None:
         self._session = session
+        self._place_business_cache: dict[str, str] = {}
 
     async def async_get_profile(self, service: Service = Service.EDA) -> dict[str, Any]:
         base = SERVICE_BASE_URLS[service.value]
@@ -117,10 +135,17 @@ class YandexEatApi:
         self,
         base: str,
         *,
-        cursor: str | None,
+        cursor: str | None = None,
+        stream_key: str | None = None,
+        stream_value: str | None = None,
     ) -> dict[str, Any] | None:
         pagination_settings: dict[str, Any] = {"limit": ORDERS_INFO_PAGE_LIMIT}
-        if cursor:
+        if stream_key and stream_value:
+            pagination_settings["cursor"] = json.dumps(
+                {"version": "1.0", stream_key: stream_value},
+                separators=(",", ":"),
+            )
+        elif cursor:
             pagination_settings["cursor"] = cursor
         body = {"pagination_settings": pagination_settings}
         url = f"{base}{ORDERS_INFO_PATH}"
@@ -137,42 +162,176 @@ class YandexEatApi:
         base: str,
         *,
         default_service: Service,
+        restaurant_as: Service,
     ) -> list[OrderHistoryEntry]:
-        merged: dict[str, OrderHistoryEntry] = {}
+        raw_merged: dict[str, dict[str, Any]] = {}
         ordered: list[str] = []
-        cursor: str | None = None
 
-        for page in range(ORDERS_INFO_MAX_PAGES):
-            data = await self._async_get_orders_info_page(base, cursor=cursor)
-            if not data:
-                break
-
-            items = _extract_orders_payload(data)
-            if not items and cursor is None:
-                break
-
+        def absorb(items: list[dict[str, Any]]) -> None:
             for item in items:
-                entry = OrderHistoryEntry.from_api(item, default_service)
-                if not entry.order_nr:
+                order_nr = str(item.get("order_nr", ""))
+                if not order_nr:
                     continue
-                if entry.order_nr not in merged:
-                    ordered.append(entry.order_nr)
-                merged[entry.order_nr] = entry
+                if order_nr not in raw_merged:
+                    ordered.append(order_nr)
+                raw_merged[order_nr] = item
 
-            ps = _pagination_settings(data)
-            has_more = ps.get("has_more")
-            if has_more is None:
-                has_more = ps.get("hasMore")
-            next_cursor = ps.get("cursor")
-            if not has_more:
-                break
-            if not next_cursor or next_cursor == cursor:
-                break
-            cursor = str(next_cursor)
+        data = await self._async_get_orders_info_page(base, cursor=None)
+        if not data:
+            return []
 
-        return [merged[order_nr] for order_nr in ordered if order_nr in merged]
+        absorb(_extract_orders_payload(data))
+        cursor_json: dict[str, Any] = {}
+        cursor_raw = _pagination_settings(data).get("cursor")
+        if isinstance(cursor_raw, str) and cursor_raw:
+            try:
+                parsed = json.loads(cursor_raw)
+                if isinstance(parsed, dict):
+                    cursor_json = parsed
+            except json.JSONDecodeError:
+                _LOGGER.debug("orders-info cursor JSON parse failed: %s", cursor_raw[:120])
 
-    async def async_get_recent_orders(self) -> list[OrderHistoryEntry]:
+        for stream_key in _ORDERS_HISTORY_STREAMS:
+            stream_value = cursor_json.get(stream_key)
+            if not stream_value:
+                continue
+            seen_values: set[str] = set()
+            for _ in range(ORDERS_INFO_MAX_PAGES):
+                if stream_value in seen_values:
+                    break
+                seen_values.add(str(stream_value))
+                page_data = await self._async_get_orders_info_page(
+                    base,
+                    stream_key=stream_key,
+                    stream_value=str(stream_value),
+                )
+                if not page_data:
+                    break
+                page_items = _extract_orders_payload(page_data)
+                if not page_items:
+                    break
+                absorb(page_items)
+                page_ps = _pagination_settings(page_data)
+                has_more = page_ps.get("has_more")
+                if has_more is None:
+                    has_more = page_ps.get("hasMore")
+                if not has_more:
+                    break
+                try:
+                    next_json = json.loads(page_ps.get("cursor", "{}"))
+                except json.JSONDecodeError:
+                    break
+                if not isinstance(next_json, dict):
+                    break
+                next_value = next_json.get(stream_key)
+                if not next_value or next_value == stream_value:
+                    break
+                stream_value = next_value
+
+        return [
+            OrderHistoryEntry.from_api(
+                raw_merged[order_nr],
+                default_service,
+                restaurant_as=restaurant_as,
+            )
+            for order_nr in ordered
+            if order_nr in raw_merged
+        ]
+
+    async def _async_get_order_detail(self, order_nr: str) -> dict[str, Any] | None:
+        if not order_nr:
+            return None
+        base = SERVICE_BASE_URLS[SERVICE_EDA]
+        url = f"{base}{ORDER_DETAIL_PATH}?order_nr={order_nr}"
+        try:
+            data = await self._session.get_json(url, headers=_service_headers(base))
+        except Exception as err:
+            _LOGGER.debug("order detail failed for %s: %s", order_nr, err)
+            return None
+        return data if isinstance(data, dict) else None
+
+    async def _async_get_place_business(self, order_nr: str) -> str | None:
+        if not order_nr or order_nr.endswith("-grocery"):
+            return "lavka" if order_nr.endswith("-grocery") else None
+        cached = self._place_business_cache.get(order_nr)
+        if cached is not None:
+            return cached or None
+
+        data = await self._async_get_order_detail(order_nr)
+        business = ""
+        if isinstance(data, dict):
+            place = data.get("place")
+            if isinstance(place, dict):
+                business = str(place.get("business") or "")
+        self._place_business_cache[order_nr] = business
+        return business or None
+
+    async def _async_supplement_from_details(
+        self,
+        merged: dict[str, OrderHistoryEntry],
+        ordered: list[str],
+        extra_order_nrs: frozenset[str],
+        *,
+        restaurant_as: Service,
+    ) -> None:
+        missing = [
+            order_nr
+            for order_nr in sorted(extra_order_nrs)
+            if order_nr and order_nr not in merged
+        ][:ORDER_DETAIL_SUPPLEMENT_LIMIT]
+        if not missing:
+            return
+
+        details = await asyncio.gather(
+            *(self._async_get_order_detail(order_nr) for order_nr in missing)
+        )
+        for detail in details:
+            if not isinstance(detail, dict) or not detail.get("order_nr"):
+                continue
+            entry = OrderHistoryEntry.from_detail(
+                detail,
+                restaurant_as=restaurant_as,
+            )
+            if entry.order_nr not in merged:
+                ordered.append(entry.order_nr)
+            merged[entry.order_nr] = entry
+
+    async def _async_enrich_order_services(
+        self,
+        entries: list[OrderHistoryEntry],
+        *,
+        restaurant_as: Service,
+    ) -> None:
+        unknown = [
+            entry
+            for entry in entries
+            if EDA_ORDER_NR_RE.match(entry.order_nr)
+            and not entry.order_nr.endswith("-grocery")
+            and not _is_retail_chain(entry.name)
+        ]
+        if not unknown:
+            return
+
+        batch_size = 10
+        for offset in range(0, len(unknown), batch_size):
+            batch = unknown[offset : offset + batch_size]
+            businesses = await asyncio.gather(
+                *(self._async_get_place_business(entry.order_nr) for entry in batch)
+            )
+            for entry, business in zip(batch, businesses, strict=True):
+                entry.service = OrderHistoryEntry.detect_service(
+                    entry.raw,
+                    entry.service,
+                    place_business=business,
+                    restaurant_as=restaurant_as,
+                )
+
+    async def async_get_recent_orders(
+        self,
+        *,
+        restaurant_as: Service = Service.EDA,
+        extra_order_nrs: frozenset[str] | None = None,
+    ) -> list[OrderHistoryEntry]:
         merged: dict[str, OrderHistoryEntry] = {}
         ordered: list[str] = []
         for base in ORDERS_INFO_BASE_URLS:
@@ -183,6 +342,7 @@ class YandexEatApi:
                 page_orders = await self._async_get_orders_from_base(
                     base,
                     default_service=default_service,
+                    restaurant_as=restaurant_as,
                 )
             except Exception as err:
                 _LOGGER.debug("order history failed for %s: %s", base, err)
@@ -193,4 +353,15 @@ class YandexEatApi:
                     ordered.append(entry.order_nr)
                 merged[entry.order_nr] = entry
 
-        return [merged[order_nr] for order_nr in ordered if order_nr in merged]
+        if extra_order_nrs:
+            await self._async_supplement_from_details(
+                merged,
+                ordered,
+                extra_order_nrs,
+                restaurant_as=restaurant_as,
+            )
+
+        result = [merged[order_nr] for order_nr in ordered if order_nr in merged]
+        result.sort(key=_history_sort_key, reverse=True)
+        await self._async_enrich_order_services(result, restaurant_as=restaurant_as)
+        return result
