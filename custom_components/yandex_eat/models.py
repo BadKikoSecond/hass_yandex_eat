@@ -123,10 +123,16 @@ class OrderStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+COURIER_TRACKING_STATUSES = frozenset(
+    {OrderStatus.PERFORMER_FOUND, OrderStatus.DELIVERY_ARRIVED}
+)
+
+
 @dataclass
 class TrackingInfo:
     grocery_image: str | None = None
-    remaining_time: int | None = None
+    delivery_eta_minutes: int | None = None
+    courier_eta_minutes: int | None = None
     courier_position: list[float] | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -134,16 +140,16 @@ class TrackingInfo:
     def from_raw(cls, raw: dict[str, Any] | None) -> TrackingInfo | None:
         if not isinstance(raw, dict):
             return None
-        remaining_time = None
+        courier_eta_minutes = None
         for key in ("remainingTime", "remaining_time", "remaining_time_sec", "eta", "etaMinutes", "minutes"):
             if key not in raw:
                 continue
             val = raw[key]
             if isinstance(val, (int, float)):
-                remaining_time = int(val if key != "remaining_time_sec" else val / 60)
+                courier_eta_minutes = int(val if key != "remaining_time_sec" else val / 60)
                 break
             if isinstance(val, str) and val.isdigit():
-                remaining_time = int(val)
+                courier_eta_minutes = int(val)
                 break
 
         courier_position = None
@@ -161,9 +167,12 @@ class TrackingInfo:
                 courier_position = [float(pos[0]), float(pos[1])]
                 break
 
+        if courier_eta_minutes is None and courier_position is None and not raw.get("groceryImage"):
+            return None
+
         return cls(
             grocery_image=raw.get("groceryImage"),
-            remaining_time=remaining_time,
+            courier_eta_minutes=courier_eta_minutes,
             courier_position=courier_position,
             raw=raw,
         )
@@ -172,9 +181,11 @@ class TrackingInfo:
     def from_progress_bar(cls, progress: dict[str, Any] | None) -> TrackingInfo | None:
         if not isinstance(progress, dict):
             return None
-        remaining_time = parse_eta_minutes_from_title(progress.get("title"))
+        delivery_eta_minutes = parse_eta_minutes_from_title(progress.get("title"))
+        if delivery_eta_minutes is None:
+            return None
         return cls(
-            remaining_time=remaining_time,
+            delivery_eta_minutes=delivery_eta_minutes,
             raw=progress,
         )
 
@@ -182,22 +193,50 @@ class TrackingInfo:
     def from_desktop_tracking(cls, raw: dict[str, Any] | None) -> TrackingInfo | None:
         if not isinstance(raw, dict):
             return None
+        delivery_eta_minutes = None
+        courier_eta_minutes = None
+        courier_position = None
+        grocery_image = None
+
         tracked_order = raw.get("tracked_order")
         if isinstance(tracked_order, dict):
-            if remaining_time := _eta_from_tracking_titles(tracked_order):
-                return cls(remaining_time=remaining_time, raw=raw)
+            delivery_eta_minutes = _eta_from_tracking_titles(tracked_order)
+
         for key in ("tracking_info", "trackingInfo", "payload", "order"):
             nested = raw.get(key)
             if isinstance(nested, dict):
                 info = cls.from_raw(nested)
-                if info and info.remaining_time is not None:
-                    return info
-        info = cls.from_raw(raw)
-        if info and (info.remaining_time is not None or info.courier_position):
-            return info
-        if remaining_time := _eta_from_tracking_titles(raw):
-            return cls(remaining_time=remaining_time, raw=raw)
-        return None
+                if info:
+                    courier_eta_minutes = info.courier_eta_minutes
+                    courier_position = info.courier_position
+                    grocery_image = info.grocery_image
+                    if courier_eta_minutes is not None:
+                        break
+
+        if courier_eta_minutes is None:
+            info = cls.from_raw(raw)
+            if info:
+                courier_eta_minutes = info.courier_eta_minutes
+                courier_position = courier_position or info.courier_position
+                grocery_image = grocery_image or info.grocery_image
+
+        if delivery_eta_minutes is None:
+            delivery_eta_minutes = _eta_from_tracking_titles(raw)
+
+        if (
+            delivery_eta_minutes is None
+            and courier_eta_minutes is None
+            and courier_position is None
+        ):
+            return None
+
+        return cls(
+            grocery_image=grocery_image,
+            delivery_eta_minutes=delivery_eta_minutes,
+            courier_eta_minutes=courier_eta_minutes,
+            courier_position=courier_position,
+            raw=raw,
+        )
 
 
 @dataclass
@@ -268,12 +307,29 @@ class TrackedOrder:
             return OrderStatus.UNKNOWN
 
     @property
+    def delivery_eta_minutes(self) -> int | None:
+        if self.order_status in COURIER_TRACKING_STATUSES:
+            return None
+        if self.tracking_info and self.tracking_info.delivery_eta_minutes is not None:
+            return self.tracking_info.delivery_eta_minutes
+        return None
+
+    @property
+    def courier_eta_minutes(self) -> int | None:
+        if self.order_status not in COURIER_TRACKING_STATUSES:
+            return None
+        if not self.tracking_info:
+            return None
+        if self.tracking_info.courier_eta_minutes is not None:
+            return self.tracking_info.courier_eta_minutes
+        return _eta_from_tracking_titles(self.tracking_info.raw)
+
+    @property
     def courier_nearby(self) -> bool:
         if self.order_status == OrderStatus.DELIVERY_ARRIVED:
             return True
-        if self.tracking_info and self.tracking_info.remaining_time is not None:
-            return self.tracking_info.remaining_time <= 5
-        return False
+        eta = self.courier_eta_minutes
+        return eta is not None and eta <= 5
 
     @property
     def is_active(self) -> bool:

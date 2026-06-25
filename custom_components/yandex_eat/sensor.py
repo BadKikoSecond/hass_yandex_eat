@@ -12,7 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
-from .const import STATE_NO_ORDER
+from .const import CURRENCY_RUB, STATE_NO_ORDER
 from .coordinator import YandexEatCoordinator
 from .entity import YandexEatAccountEntity, primary_order_attributes
 from .models import OrderStatus, Service, parse_order_year
@@ -61,11 +61,8 @@ class YandexEatActiveOrdersSensor(YandexEatAccountEntity, SensorEntity):
                     "status": order.status,
                     "service": order.service.value,
                     "courier_nearby": order.courier_nearby,
-                    "eta_minutes": (
-                        order.tracking_info.remaining_time
-                        if order.tracking_info and order.tracking_info.remaining_time is not None
-                        else None
-                    ),
+                    "courier_eta_minutes": order.courier_eta_minutes,
+                    "delivery_eta_minutes": order.delivery_eta_minutes,
                 }
                 for order in self.coordinator.active_orders
             ],
@@ -114,23 +111,20 @@ class YandexEatCourierEtaSensor(YandexEatAccountEntity, SensorEntity):
     @property
     def native_value(self) -> int | None:
         order = self.primary_order
-        if order is None or not order.tracking_info:
+        if order is None:
             return None
-        return order.tracking_info.remaining_time
+        return order.courier_eta_minutes
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         attrs = primary_order_attributes(self.coordinator)
         order = self.primary_order
-        if (
-            order
-            and order.tracking_info
-            and order.tracking_info.remaining_time is not None
-        ):
-            eta = order.tracking_info.remaining_time
-            attrs["arrival_time"] = (
-                dt_util.now() + timedelta(minutes=eta)
-            ).isoformat()
+        if order and order.delivery_eta_minutes is not None:
+            attrs["delivery_eta_minutes"] = order.delivery_eta_minutes
+        if order and order.courier_eta_minutes is not None:
+            eta = order.courier_eta_minutes
+            attrs["courier_eta_minutes"] = eta
+            attrs["arrival_time"] = (dt_util.now() + timedelta(minutes=eta)).isoformat()
         return attrs
 
 

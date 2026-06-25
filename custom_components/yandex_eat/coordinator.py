@@ -195,18 +195,13 @@ class YandexEatCoordinator(DataUpdateCoordinator[YandexEatCoordinatorData]):
             return nearby[0]
 
         with_eta = [
-
             order
-
             for order in orders
-
-            if order.tracking_info and order.tracking_info.remaining_time is not None
-
+            if order.courier_eta_minutes is not None
         ]
 
         if with_eta:
-
-            return min(with_eta, key=lambda order: order.tracking_info.remaining_time)  # type: ignore[union-attr]
+            return min(with_eta, key=lambda order: order.courier_eta_minutes)  # type: ignore[arg-type,return-value]
 
         return orders[0]
 
@@ -221,12 +216,13 @@ class YandexEatCoordinator(DataUpdateCoordinator[YandexEatCoordinatorData]):
         attrs["courier_nearby"] = order.courier_nearby
 
         if order.tracking_info:
-
             attrs["tracking_info"] = order.tracking_info.raw
 
-            if order.tracking_info.remaining_time is not None:
+        if order.delivery_eta_minutes is not None:
+            attrs["delivery_eta_minutes"] = order.delivery_eta_minutes
 
-                attrs["eta_minutes"] = order.tracking_info.remaining_time
+        if order.courier_eta_minutes is not None:
+            attrs["courier_eta_minutes"] = order.courier_eta_minutes
 
         return attrs
 
