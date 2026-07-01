@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://my.home-assistant.io/redirect/hacs_repository/?owner=BadKikoSecond&repository=hass_yandex_eat&category=integration">
-    <img src="assets/icon.png" alt="Yandex Eat" width="160">
+    <img src="custom_components/yandex_eat/brand/icon@2x.png" alt="Yandex Eat" width="160">
   </a>
 </p>
 
@@ -12,14 +12,14 @@
     <img src="https://img.shields.io/badge/Home%20Assistant-2024.1%2B-03A9F4?style=for-the-badge&logo=home-assistant&logoColor=white" alt="Home Assistant 2024.1+">
   </a>
   <a href="https://my.home-assistant.io/redirect/hacs_repository/?owner=BadKikoSecond&repository=hass_yandex_eat&category=integration">
-    <img src="https://img.shields.io/badge/HACS-Custom-FFCC00?style=for-the-badge&logo=https%3A%2F%2Fraw.githubusercontent.com%2FBadKikoSecond%2Fhass_yandex_eat%2Fmain%2Fassets%2Ficon.png" alt="HACS Custom">
+    <img src="https://img.shields.io/badge/HACS-Custom-FFCC00?style=for-the-badge&logo=https%3A%2F%2Fraw.githubusercontent.com%2FBadKikoSecond%2Fhass_yandex_eat%2Fmain%2Fcustom_components%2Fyandex_eat%2Fbrand%2Ficon.png" alt="HACS Custom">
   </a>
   <img src="https://img.shields.io/badge/Яндекс%20Еда-Деливери-Лавка-FC3F1D?style=for-the-badge" alt="Сервисы">
 </p>
 
 <p align="center">
   <a href="https://my.home-assistant.io/redirect/hacs_repository/?owner=BadKikoSecond&repository=hass_yandex_eat&category=integration">
-    <img src="https://img.shields.io/badge/Добавить_в-HACS-FFCC00?style=for-the-badge&labelColor=1a1a1a&logo=https%3A%2F%2Fraw.githubusercontent.com%2FBadKikoSecond%2Fhass_yandex_eat%2Fmain%2Fassets%2Ficon.png" alt="Добавить в HACS">
+    <img src="https://img.shields.io/badge/Добавить_в-HACS-FFCC00?style=for-the-badge&labelColor=1a1a1a&logo=https%3A%2F%2Fraw.githubusercontent.com%2FBadKikoSecond%2Fhass_yandex_eat%2Fmain%2Fcustom_components%2Fyandex_eat%2Fbrand%2Ficon.png" alt="Добавить в HACS">
   </a>
   &nbsp;
   <a href="https://my.home-assistant.io/redirect/config_flow_start/?domain=yandex_eat">
@@ -168,9 +168,10 @@ GET https://lavka.yandex.ru/api/v1/providers/orders/v1/tracked-orders  # Лав�
 
 ```
 hacs.json
-assets/                         # логотип для README и HA
 custom_components/yandex_eat/   # интеграция Home Assistant
   manifest.json
+  icon.png
+  brand/
   config_flow.py
   sensor.py
   binary_sensor.py
